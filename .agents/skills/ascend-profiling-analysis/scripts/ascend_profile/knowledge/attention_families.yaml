@@ -1,0 +1,263 @@
+version: 1
+
+# ----------------------------------------------------------------------------
+# Attention family detection (paper-aligned names)
+# ----------------------------------------------------------------------------
+# Family names come from the DeepSeek / upstream papers. The CANN /
+# vllm-ascend backend that implements them is annotated as
+# ``ascend_backend`` (for traceability) but is NEVER used as a family name
+# itself.
+#
+# Why we keep paper names and not backend names:
+#   - V3.2 (DSA per arxiv 2512.02556) and V4 (CSA per the DSV4 paper) BOTH
+#     route through ``AscendSFABackend`` on Ascend, but they are distinct
+#     architectures with distinct kernel signatures. Calling either of
+#     them "sfa" would hide the V3.2 ↔ V4 distinction in the report.
+
+families:
+
+  # ========================================================================
+  # 1. CSA — Compressed Sparse Attention (DeepSeek-V4 main layers)
+  # ========================================================================
+  csa:
+    paper_name: Compressed Sparse Attention (CSA)
+    paper_source: DeepSeek-V4 release paper / technical report
+    ascend_backend: AscendSFABackend
+    ascend_module: vllm-ascend/vllm_ascend/attention/sfa_v1.py
+    discriminator: |
+      Compressor + Lightning Indexer + Sparse-SharedKV all present in the
+      same attention block. The compressor performs 4x KV block
+      compression (per the V4 paper), the Lightning Indexer selects the
+      top-k compressed blocks, and the main sparse attention kernel
+      consumes the selection.
+    must_have:
+      - [attention.kv_compressor]
+      - [attention.lightning_indexer]
+      - [attention.sparse_sharedkv]
+    must_not_have: []
+    typical_companions:
+      - attention.mla.kv_norm_rope_cache    # SFA backend reuses MLA KV pipe
+      - attention.rope.interleave
+      - attention.rope.partial
+      - attention.sparse_attn.v_up_proj
+      - quant.dynamic
+    used_by_hf_arch:
+      - DeepseekV4ForCausalLM        # when present in vllm registry
+    evidence:
+      - "DeepSeek-V4 paper: CSA = 4x KV compression + Lightning Indexer + sliding window"
+      - "vllm-ascend/vllm_ascend/attention/sfa_v1.py:1064 — npu_sparse_flash_attention"
+
+  # ========================================================================
+  # 2. HCA — Heavily Compressed Attention (DeepSeek-V4 alternating layers)
+  # ========================================================================
+  hca:
+    paper_name: Heavily Compressed Attention (HCA)
+    paper_source: DeepSeek-V4 paper §"alternating CSA and HCA layers"
+    ascend_backend: AscendSFABackend (heuristic — same backend, dense path)
+    discriminator: |
+      Compressor present + dense FIA score, but NO Lightning Indexer and
+      NO Sparse-SharedKV. The V4 paper describes HCA as "128x compression
+      and dense attention" alternating layer-by-layer with CSA.
+    must_have:
+      - [attention.kv_compressor]
+      - [attention.gqa_or_mha]
+    must_not_have:
+      - attention.lightning_indexer
+      - attention.sparse_sharedkv
+    confidence: heuristic
+    evidence:
+      - "DeepSeek-V4 paper: HCA uses 128x compression + dense attention,
+        alternates with CSA layer-by-layer"
+    notes: |
+      Detection is heuristic until a confirmed HCA-only profile sample is
+      available. False positives possible if a V3.2 model runs with KV
+      compression enabled in a non-CSA layer; document any flagged HCA
+      blocks before drawing conclusions.
+
+  # ========================================================================
+  # 3. DSA — DeepSeek Sparse Attention (DeepSeek-V3.2)
+  # ========================================================================
+  dsa:
+    paper_name: DeepSeek Sparse Attention (DSA)
+    paper_source: arxiv 2512.02556 (DeepSeek-V3.2)
+    ascend_backend: AscendSFABackend
+    ascend_module: vllm-ascend/vllm_ascend/attention/sfa_v1.py
+    discriminator: |
+      Lightning Indexer + Sparse-SharedKV present, but **no** KV
+      compressor. The V3.2 paper instantiates DSA on top of MLA in MQA
+      mode: each latent vector is shared across all query heads, and the
+      Lightning Indexer picks top-k tokens (not compressed blocks).
+    must_have:
+      - [attention.lightning_indexer]
+      - [attention.sparse_sharedkv]
+    must_not_have:
+      - attention.kv_compressor
+    typical_companions:
+      - attention.mla.preprocess           # DSA inherits MLA preprocessing
+      - attention.mla.kv_norm_rope_cache
+      - attention.mla.v_up_proj
+      - attention.rope.interleave
+    used_by_hf_arch:
+      - DeepseekV32ForCausalLM
+    evidence:
+      - "arxiv 2512.02556 §4: DSA = Lightning Indexer + fine-grained
+        token selection over MLA in MQA mode"
+      - "vllm-ascend/vllm_ascend/platform.py:524-528 — use_sparse via index_topk"
+      - "vllm-ascend/vllm_ascend/attention/sfa_v1.py:1023 — npu_lightning_indexer"
+
+  # ========================================================================
+  # 4. MLA — Multi-head Latent Attention (DeepSeek-V2 / V3)
+  # ========================================================================
+  mla:
+    paper_name: Multi-head Latent Attention (MLA)
+    paper_source: DeepSeek-V2 paper
+    ascend_backend: AscendMLABackend
+    ascend_module: vllm-ascend/vllm_ascend/attention/mla_v1.py
+    discriminator: |
+      MLA preprocessing (MlaProlog / MlaPrologV2 / MlaPreprocess) or
+      KvRmsNormRopeCache present, and NO sparse-attention markers (no
+      Compressor, no Lightning Indexer, no Sparse-SharedKV).
+    must_have_any:
+      - attention.mla.preprocess
+      - attention.mla.kv_norm_rope_cache
+      - attention.mla.v_up_proj
+    must_not_have:
+      - attention.kv_compressor
+      - attention.lightning_indexer
+      - attention.sparse_sharedkv
+    typical_companions:
+      - attention.gqa_or_mha                # FIA[V2] still computes the score
+      - attention.rope.interleave
+      - quant.dynamic
+    used_by_hf_arch:
+      - DeepseekV2ForCausalLM
+      - DeepseekV3ForCausalLM
+      - DeepseekForCausalLM
+      - LongcatFlashForCausalLM
+      - MiniCPM3ForCausalLM
+      - SarvamMLAForCausalLM
+      - SarvamMoEForCausalLM
+      - AXK1ForCausalLM
+      - GlmMoeDsaForCausalLM                # "DSA" suffix is a marketing label, impl is MLA
+    evidence:
+      - "vllm-ascend/vllm_ascend/platform.py:601 backend_map[(True, False)]"
+      - "vllm-ascend/vllm_ascend/attention/mla_v1.py:698 AscendMLAImpl"
+
+  # ========================================================================
+  # 5. KVComp overlay — Hamming-distance KV pruning (decode-only)
+  # ========================================================================
+  kvcomp_overlay:
+    paper_name: KV Compression (kvcomp)
+    paper_source: vllm-ascend internal extension
+    ascend_module: vllm-ascend/vllm_ascend/attention/kvcomp_attn/attention_utils.py
+    discriminator: |
+      External ``sparse_json`` config enables KV compression. Reported as
+      an **overlay** on top of the host family (mla / dsa / dense): the
+      host family label is suffixed with ``+kvc``.
+    overlay_of: [mla, dsa, gqa]
+    must_have:
+      - [attention.kvcomp.topk]
+    used_by_hf_arch: []                      # opt-in
+    evidence:
+      - "vllm-ascend/vllm_ascend/attention/kvcomp_attn/attention_utils.py:87,123"
+
+  # ========================================================================
+  # 6. Linear / Mamba / GDN
+  # ========================================================================
+  linear:
+    paper_name: Linear attention / SSM / Gated-Delta-Net
+    must_have:
+      - [attention.linear_or_mamba]
+    must_not_have:
+      - attention.mla.kv_norm_rope_cache
+      - attention.sparse_sharedkv
+    used_by_hf_arch:
+      - Qwen3NextForCausalLM                 # hybrid: some layers
+      - Mamba2ForCausalLM
+      - MambaForCausalLM
+      - FalconMambaForCausalLM
+      - MiniMaxText01ForCausalLM
+      - JambaForCausalLM
+      - KimiLinearForCausalLM
+      - BailingMoeV2_5ForCausalLM
+
+  # ========================================================================
+  # 7. Dense GQA / MHA — fallback
+  # ========================================================================
+  gqa:
+    paper_name: Grouped-Query Attention (GQA) / Multi-Head Attention (MHA)
+    ascend_backend: AscendAttentionBackend
+    ascend_module: vllm-ascend/vllm_ascend/attention/attention_v1.py
+    must_have:
+      - [attention.gqa_or_mha]
+    must_not_have:
+      - attention.kv_compressor
+      - attention.lightning_indexer
+      - attention.sparse_sharedkv
+      - attention.mla.kv_norm_rope_cache
+      - attention.linear_or_mamba
+    sub_kinds:
+      mha: { config_signal: "num_key_value_heads == num_attention_heads" }
+      gqa: { config_signal: "num_key_value_heads <  num_attention_heads" }
+      mqa: { config_signal: "num_key_value_heads == 1" }
+    used_by_hf_arch:
+      - LlamaForCausalLM
+      - Qwen2ForCausalLM
+      - Qwen3ForCausalLM
+      - Qwen2MoeForCausalLM
+      - Qwen3MoeForCausalLM
+      - MixtralForCausalLM
+      - MistralForCausalLM
+      - PhimoeForCausalLM
+      - GptOssForCausalLM
+      - DbrxForCausalLM
+      - OlmoeForCausalLM
+      - Gemma2ForCausalLM
+      - Gemma3ForCausalLM
+      - InternLMForCausalLM
+      - BaiChuanForCausalLM
+      - ChatGLMModel
+      - Ernie4_5_MoeForCausalLM
+    evidence:
+      - "vllm-ascend/vllm_ascend/platform.py:602 backend_map[(False, False)]"
+
+# ----------------------------------------------------------------------------
+# Cross-family disambiguation cheat-sheet (decision order; analyser short-circuits)
+# ----------------------------------------------------------------------------
+cheat_sheet:
+  decision_order:
+    - |
+      1. CSA: ``attention.kv_compressor`` AND ``attention.lightning_indexer``
+         AND ``attention.sparse_sharedkv``  →  family = csa.
+    - |
+      2. HCA (heuristic): ``attention.kv_compressor`` AND ``attention.gqa_or_mha``
+         AND NOT ``attention.lightning_indexer`` AND NOT ``attention.sparse_sharedkv``
+         →  family = hca.
+    - |
+      3. DSA: ``attention.lightning_indexer`` AND ``attention.sparse_sharedkv``
+         AND NOT ``attention.kv_compressor``  →  family = dsa.
+    - |
+      4. MLA: any of ``attention.mla.preprocess``,
+         ``attention.mla.kv_norm_rope_cache``, ``attention.mla.v_up_proj``,
+         AND NONE of the sparse-attention markers  →  family = mla.
+    - |
+      5. Linear: ``attention.linear_or_mamba``  →  family = linear.
+    - |
+      6. FA: any kernel name matches ``flashattention``  →  family = fa.
+    - |
+      7. GQA: ``attention.gqa_or_mha`` (the FIA family) and no other
+         attention markers  →  family = gqa.
+    - |
+      8. Otherwise  →  family = attn.
+  overlay:
+    - "If ``attention.kvcomp.topk`` is present, append ``+kvc`` to the family label."
+
+# ----------------------------------------------------------------------------
+# Why we don't subdivide CSA / DSA / MLA further at the family level
+# ----------------------------------------------------------------------------
+non_goals: |
+  The per-kernel categories (``attention.mla.preprocess``,
+  ``attention.sparse_sharedkv.metadata``, …) carry the sub-kind detail
+  agents need; a coarser family label per block keeps cross-rank alignment
+  simple. If you need finer attribution, drill down through op_categories
+  in operator_summary.csv instead of forcing a finer family enum.

@@ -69,6 +69,48 @@ on-device sequencing in `kernel_details.csv` and is independent of
 stream skew, so two ranks executing the same layer always agree on the
 boundary.
 
+## 3a. Attention sub-family (annotation, not a separate `block_kind`)
+
+The block kind stays at the coarse `attention` granularity, but the
+analyser annotates each attention block with the **attention family**
+that produced it.  Detection is signature-based and uses category labels
+emitted in `op_categories`, never single-kernel substring matches.  The
+full rules live in `knowledge/attention_families.yaml`; the decision
+order is:
+
+Family names follow the **DeepSeek papers**, not the CANN backend
+class (DSA and CSA both route through `AscendSFABackend` on Ascend,
+but they are different paper architectures distinguished by whether
+the Compressor kernel is present):
+
+1. `attention.kv_compressor` AND `attention.lightning_indexer` AND
+   `attention.sparse_sharedkv` → **CSA** (DeepSeek-V4 main layers,
+   "Compressed Sparse Attention" per the V4 paper).
+2. else `attention.kv_compressor` AND `attention.gqa_or_mha` with NO
+   indexer / sparse-sharedkv → **HCA** (DeepSeek-V4 alternating layers,
+   "Heavily Compressed Attention"; heuristic).
+3. else `attention.lightning_indexer` AND `attention.sparse_sharedkv`,
+   NO `attention.kv_compressor` → **DSA** (DeepSeek-V3.2,
+   "DeepSeek Sparse Attention" per arxiv 2512.02556 §4).
+4. else any of `attention.mla.preprocess` /
+   `attention.mla.kv_norm_rope_cache` / `attention.mla.v_up_proj`,
+   with NO sparse signatures → **MLA** (DeepSeek-V2 / V3).
+5. else `attention.linear_or_mamba` present → **linear / mamba / GDN**.
+6. else `attention.gqa_or_mha` only → **dense GQA / MHA**.
+
+`attention.kvcomp.topk` is an *overlay* on top of one of the above
+(Hamming-distance KV pruning helper) — it does not change the host
+family, only appends a `+kvc` suffix to the label.
+
+The sparse-attention kernel categories (`attention.sparse_sharedkv`,
+`attention.lightning_indexer`, `attention.kv_compressor`) are kept
+**paper-neutral** so the same Compressor kernel can serve both CSA
+and HCA without baking the V4 architecture name into the kernel
+label.
+
+The label feeds `html_report.detect_attention_subtype` and the L2 block
+header.  It does NOT change segmentation or the bound calculation.
+
 ## 4. Why we don't split FFN further
 
 Splitting `ffn` into "gate matmul / up matmul / down matmul" would be

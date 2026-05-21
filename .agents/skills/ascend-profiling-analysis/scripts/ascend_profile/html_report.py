@@ -372,23 +372,87 @@ def assess_companion_run(b) -> dict:
 
 
 def detect_attention_subtype(b, row_start: int, row_end: int, rank_id: str) -> str:
-    """Inspect kernels within [row_start, row_end) of `rank_id` to identify attention sub-type.
+    """Inspect kernels within [row_start, row_end) of `rank_id` to identify attention family.
 
-    Returns one of: 'mla' (DeepSeek-style sparse / compressed-KV), 'fa' (FlashAttention),
-    'gqa' (FIA with grouped-query — assumed default for FIA users), 'attn' (unknown).
+    Returns one of the **paper-aligned** family names:
+
+      * ``csa``     — Compressed Sparse Attention (DeepSeek V4 main layers;
+                       paper: arxiv DeepSeek-V4). Signature: KV compressor +
+                       Lightning Indexer + sparse shared-KV attention.
+      * ``hca``     — Heavily Compressed Attention (DeepSeek V4 alternating
+                       layers). Signature: KV compressor + dense FIA, no
+                       Lightning Indexer. Heuristic — flag low confidence
+                       if seen in isolation.
+      * ``dsa``     — DeepSeek Sparse Attention (DeepSeek V3.2; paper:
+                       arxiv 2512.02556). Signature: Lightning Indexer +
+                       sparse shared-KV attention, **no** KV compressor
+                       (DSA builds on MLA with top-k token selection only).
+      * ``mla``     — Multi-head Latent Attention (DeepSeek V2 / V3).
+                       Signature: MlaProlog / MlaPreprocess /
+                       KvRmsNormRopeCache, no sparse signatures.
+      * ``linear``  — Mamba / GDN / linear-attention.
+      * ``fa``      — generic FlashAttention path.
+      * ``gqa``     — dense GQA / MHA via FIA (Llama / Qwen / Mistral …).
+      * ``attn``    — unknown.
+
+    The CANN / vllm-ascend implementation routes both DSA and CSA / HCA
+    through ``AscendSFABackend`` (``sfa_v1.py``); we keep the paper names
+    in the report and document the backend identity in
+    ``attention_families.yaml``.
+
+    A trailing ``+kvc`` suffix indicates the Hamming-distance KV-compression
+    overlay is active (an opt-in decode helper, see attention_families.yaml).
+
+    Decision order mirrors ``knowledge/attention_families.yaml:cheat_sheet``.
     """
     events = events_in_row_range(b.events, row_start, row_end, rank_id)
     name_set = {short_op_name(e.name) for e in events}
     name_lower = {n.lower() for n in name_set}
-    mla_markers = ("matmulcompressedkv", "absorbmatmul", "mlaprolog",
-                   "sparseattnsharedkv", "compressor")
-    if any(any(m in n for m in mla_markers) for n in name_lower):
-        return "mla"
-    if any("flashattention" in n for n in name_lower):
-        return "fa"
-    if any("fusedinferattention" in n or n.startswith("fia") for n in name_lower):
-        return "gqa"  # vLLM-Ascend uses FIA for GQA/MHA; sub-precision needs shape parse
-    return "attn"
+
+    def has(*needles: str) -> bool:
+        return any(any(needle in n for needle in needles) for n in name_lower)
+
+    has_compressor = has("compressor", "kvcompressepilog")
+    has_indexer = has("lightningindexer", "lightningindex", "indexercompressepilog")
+    has_sparse_sharedkv = has(
+        "sparseattnsharedkv", "sparseattentionsharedkv", "sharedkv", "kvquantsparseattn"
+    )
+    has_dense_fia = any("fusedinferattention" in n or n.startswith("fia") for n in name_lower)
+    has_mla_marker = has(
+        "mlaprolog", "mlaprologv2", "mlaprologweightnz", "mlapreprocess",
+        "matmulcompressedkv", "absorbmatmul",
+        "kvrmsnormropecache", "transposequantbatchmatmul", "transposebatchmatmul",
+    )
+
+    # 1. CSA (V4 main layers): Compressor + Indexer + Sparse-SharedKV all present.
+    if has_compressor and has_indexer and has_sparse_sharedkv:
+        base = "csa"
+    # 2. HCA (V4 alternating layers): Compressor + dense FIA, but NO indexer / sparse.
+    #    Heuristic — only matches when CSA's sparse signatures are absent.
+    elif has_compressor and has_dense_fia and not has_indexer and not has_sparse_sharedkv:
+        base = "hca"
+    # 3. DSA (V3.2): Indexer + Sparse-SharedKV, but NO Compressor (DSA = top-k over MLA).
+    elif has_indexer and has_sparse_sharedkv and not has_compressor:
+        base = "dsa"
+    # 4. MLA (V2/V3): MLA preprocess / KV-norm-rope-cache, no sparse signatures.
+    elif has_mla_marker and not (has_indexer or has_sparse_sharedkv or has_compressor):
+        base = "mla"
+    # 5. Linear / Mamba / GDN.
+    elif has("causalconv1d", "causalconv", "mamba", "deltanet", "gdn"):
+        base = "linear"
+    # 6. Generic FlashAttention path.
+    elif has("flashattention"):
+        base = "fa"
+    # 7. Dense GQA / MHA via FIA.
+    elif has_dense_fia:
+        base = "gqa"
+    else:
+        base = "attn"
+
+    # KVComp overlay (decode-only Hamming-distance KV pruning).
+    if has("hammingdisttopk"):
+        base = f"{base}+kvc"
+    return base
 
 
 def derive_layer_composition(b, ls: dict) -> str:

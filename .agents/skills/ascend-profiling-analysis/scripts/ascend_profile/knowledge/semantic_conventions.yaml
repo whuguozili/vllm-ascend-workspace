@@ -36,11 +36,14 @@ attributes:
     multi: true
     values:
       - attention
+      - attention_aux              # SFA / MLA companion: indexer, KV cache write, RoPE, V-up-proj
       - moe
       - ffn
+      - compute
       - communication
       - normalization
       - block_head
+      - quant
       - selection
       - sampling
       - aicpu
@@ -53,26 +56,98 @@ attributes:
   op_categories:
     description: |
       Fine-grained categories used by the rule matcher (multi-valued).
-      Categories are namespaced ``domain.subkind``.
+      Categories are namespaced ``domain.subkind`` and are **kernel-level
+      neutral** — the same kernel category can serve multiple paper
+      architectures. The architecture-level paper name (mla / dsa / csa /
+      hca / gqa) is resolved separately, see ``attention_family`` below.
+      Provenance lives in ``knowledge/kernel_signatures.yaml`` (per-kernel
+      ``evidence: path:line``) and the family-resolution combinations in
+      ``knowledge/attention_families.yaml``.
     type: enum
     multi: true
     values:
+      # --- attention: dense GQA / MHA / generic
       - attention.gqa_or_mha
+      - attention.generic
+      # --- attention: MLA preprocessing (V2/V3, also reused by DSA in V3.2)
       - attention.mla
-      - attention.csa
+      - attention.mla.preprocess
+      - attention.mla.kv_norm_rope_cache
+      - attention.mla.v_up_proj
+      # --- attention: sparse-attention building blocks
+      #     Neutral names. Used by both DSA (V3.2) and CSA (V4). The CANN
+      #     backend implementing them is ``AscendSFAImpl`` (sfa_v1.py).
+      #     Family resolution (csa / dsa / hca) lives in
+      #     attention_families.yaml — never bake the paper name into the
+      #     kernel category.
+      - attention.sparse_sharedkv
+      - attention.sparse_sharedkv.metadata
+      - attention.lightning_indexer
+      - attention.kv_compressor
+      - attention.sparse_attn.v_up_proj
+      # --- attention: KVComp overlay (decode-only Hamming-distance pruning)
+      - attention.kvcomp
+      - attention.kvcomp.topk
+      - attention.kvcomp.signpack
+      - attention.kvcomp.cache_write
+      # --- attention: linear / mamba / GDN
       - attention.linear_or_mamba
+      # --- attention: RoPE companions
+      - attention.rope
+      - attention.rope.interleave
+      - attention.rope.partial
+      - attention.rope.indexed
+      # --- MoE
       - moe.gating
       - moe.dispatch
       - moe.combine
       - moe.dispatch_expert_compute
+      - moe.expert_matmul
+      # --- compute / quant
       - compute.matmul
+      - compute.aux
       - compute.norm
+      - normalization
+      - quant.dynamic
+      - quant.mx
+      - quant.matmul
+      # --- communication
       - communication.collective
+      - communication.allreduce
+      - communication.allgather
+      - communication.reducescatter
+      - communication.alltoallv
       - communication.point_to_point
+      # --- system / heuristic
       - block_head
+      - block_head.mhc_prefix
       - sampling_or_selection
+      - sampling.argmax
+      - sampling.top_k_top_p
       - aicpu
       - dummy_or_reduced_work
+
+  attention_family:
+    description: |
+      Single paper-aligned label assigned to each attention block by
+      ``html_report.detect_attention_subtype``. Used for the L2 block
+      header. NOT used by the segmenter.
+
+      Names follow the DeepSeek papers, not the CANN / vllm-ascend
+      backend class. (DSA and CSA both route through AscendSFABackend
+      on Ascend, but they are different paper architectures.)
+    type: enum
+    values:
+      - csa                        # DeepSeek V4: Compressed Sparse Attention (main layers)
+      - hca                        # DeepSeek V4: Heavily Compressed Attention (alternating)
+      - dsa                        # DeepSeek V3.2: DeepSeek Sparse Attention (arxiv 2512.02556)
+      - mla                        # DeepSeek V2 / V3: Multi-head Latent Attention
+      - gqa                        # dense GQA / MHA via FIA (Llama / Qwen / Mistral …)
+      - fa                         # generic FlashAttention path
+      - linear                     # Mamba / GDN / linear attention
+      - attn                       # unknown / unclassified
+    suffix:
+      "+kvc": "KVComp (Hamming-distance KV pruning) overlay active"
 
   bound_family:
     description: |

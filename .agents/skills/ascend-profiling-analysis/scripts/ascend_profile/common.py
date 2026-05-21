@@ -771,6 +771,33 @@ _CATEGORY_ROLE_CACHE: dict[tuple[str, str, str], tuple[tuple[str, ...], tuple[st
 
 
 def categories_and_roles(name: str, task_type: str, accelerator_core: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Classify one kernel into op_categories + op_roles.
+
+    The rule order and signatures below are the Python mirror of
+    ``knowledge/kernel_signatures.yaml``.  When adding a new kernel:
+
+    1. Add it to ``kernel_signatures.yaml`` with ``evidence: path:line``.
+    2. If it changes a family's must-have set, update
+       ``attention_families.yaml`` or ``moe_families.yaml``.
+    3. Mirror the rule here.
+    4. Add any new category to ``semantic_conventions.yaml`` so the
+       schema test passes.
+
+    **Naming policy — paper vs CANN backend:**
+
+    * Architecture-family labels (``mla`` / ``dsa`` / ``csa`` / ``hca``)
+      are the names used in the DeepSeek papers and are what we surface
+      in the report.
+    * CANN / vllm-ascend route them through *backend* classes:
+      ``AscendMLAImpl`` for MLA, ``AscendSFAImpl`` for both DSA (V3.2)
+      and CSA (V4). The runtime backend is annotated separately and is
+      NOT used as a category name to avoid hiding the paper-level
+      distinction.
+    * Kernel-level categories below are **neutral** so the same Compressor
+      kernel can serve both CSA (V4) and HCA (V4); the architecture
+      family is then resolved from the *combination* of kernels present
+      in a block.
+    """
     cache_key = (name, task_type, accelerator_core)
     cached = _CATEGORY_ROLE_CACHE.get(cache_key)
     if cached is not None:
@@ -778,64 +805,211 @@ def categories_and_roles(name: str, task_type: str, accelerator_core: str) -> tu
     text = fold_text(f"{name} {task_type} {accelerator_core}")
     categories: set[str] = set()
     roles: set[str] = set()
+
+    # --- Communication ----------------------------------------------------
     if any(token in text for token in ("hccl", "hcom", "allreduce", "allgather", "reducescatter", "alltoall")):
         categories.add("communication.collective")
         roles.add("communication")
-    if "metadata" in text and any(token in text for token in ("sparseattnsharedkv", "sparseattentionsharedkv", "sharedkv")):
-        categories.add("attention.csa.metadata")
+        if "allreduce" in text:
+            categories.add("communication.allreduce")
+        if "allgather" in text:
+            categories.add("communication.allgather")
+        if "reducescatter" in text:
+            categories.add("communication.reducescatter")
+        if "alltoall" in text:
+            categories.add("communication.alltoallv")
+
+    # --- Attention: sparse-attention building blocks ----------------------
+    #     These appear in BOTH DSA (V3.2) and CSA (V4). The architecture
+    #     family is decided later from the *combination* (see
+    #     html_report.detect_attention_subtype):
+    #       - kv_compressor + lightning_indexer + sparse_sharedkv  -> CSA (V4)
+    #       - lightning_indexer + sparse_sharedkv, no kv_compressor -> DSA (V3.2)
+    #       - kv_compressor + dense FIA, no indexer/sparse_sharedkv -> HCA (V4)
+    if any(token in text for token in ("sparseattnsharedkv", "sparseattentionsharedkv", "sharedkv")):
+        if "metadata" in text:
+            categories.add("attention.sparse_sharedkv.metadata")
+            roles.add("attention_aux")
+        else:
+            categories.add("attention.sparse_sharedkv")
+            roles.add("attention")
+    if any(token in text for token in ("lightningindex", "lightningindexer", "indexercompressepilog")):
+        categories.add("attention.lightning_indexer")
         roles.add("attention_aux")
-    elif any(token in text for token in ("fusedinferattentionscore", "unpadflashattention", "flashattention")):
-        categories.add("attention.gqa_or_mha")
+    if "compressor" in text or "kvcompressepilog" in text:
+        # KV compression (only V4 CSA / HCA, NOT V3.2 DSA).
+        categories.add("attention.kv_compressor")
+        roles.add("attention_aux")
+    if "batchmatmultranspose" in text:
+        # SFA backend custom V up-proj op (sfa_v1.py:841). Used by both
+        # DSA and CSA when the ≤1024-token path is selected.
+        categories.add("attention.sparse_attn.v_up_proj")
+        categories.add("compute.matmul")
         roles.add("attention")
-    if "metadata" not in text and any(token in text for token in ("sparseattnsharedkv", "sparseattentionsharedkv", "sharedkv")):
-        categories.add("attention.csa")
-        roles.add("attention")
-    if "mla" in text and "matmul" not in text:
+
+    # --- Attention: MLA (DeepSeek V2 / V3; also reused by DSA in V3.2) ----
+    # CANN canonical op names (per the CANN doc and PR #3226 in
+    # vllm-ascend): ``mla_prolog``, ``mla_prolog_v2``, plus the
+    # vllm-ascend custom kernel ``mla_preprocess``. We accept all three
+    # spellings — older traces show "MlaProlog", newer ones "MlaPreprocess".
+    if any(token in text for token in (
+        "mlapreprocess",
+        "mlaprolog",
+        "mlaprologv2",
+        "mlaprologweightnz",
+        "mlapo",
+    )):
+        categories.add("attention.mla.preprocess")
         categories.add("attention.mla")
         roles.add("attention")
+    if "kvrmsnormropecache" in text:
+        categories.add("attention.mla.kv_norm_rope_cache")
+        categories.add("attention.rope")
+        roles.add("attention_aux")
+    if "transposebatchmatmul" in text or "transposequantbatchmatmul" in text:
+        # MLA V up-proj uses npu_transpose_batchmatmul (mla_v1.py:893).
+        categories.add("attention.mla.v_up_proj")
+        categories.add("compute.matmul")
+        roles.add("attention")
+
+    # --- Attention: KVComp overlay (Hamming-distance KV pruning) ----------
+    if "hammingdisttopk" in text:
+        categories.add("attention.kvcomp.topk")
+        categories.add("attention.kvcomp")
+        roles.add("attention_aux")
+    if "signbitspack" in text:
+        categories.add("attention.kvcomp.signpack")
+        roles.add("attention_aux")
+    if "reshapeandcachebnsd" in text:
+        categories.add("attention.kvcomp.cache_write")
+        roles.add("attention_aux")
+
+    # --- Attention: dense GQA / MHA ---------------------------------------
+    if any(token in text for token in ("fusedinferattentionscore", "unpadflashattention", "flashattentionscore", "flashattention")):
+        categories.add("attention.gqa_or_mha")
+        roles.add("attention")
+
+    # --- Attention: linear / mamba / GDN ----------------------------------
     if any(token in text for token in ("causalconv", "causalconv1d", "mamba", "deltanet", "gdn")):
         categories.add("attention.linear_or_mamba")
         roles.add("attention")
-    if "attention" in text and not any(cat.startswith("attention.") for cat in categories):
+
+    # --- Attention: RoPE companions ---------------------------------------
+    if "interleaverope" in text:
+        categories.add("attention.rope.interleave")
+        categories.add("attention.rope")
+        roles.add("attention_aux")
+    if "rotarymul" in text or "partialrotarymul" in text:
+        # InPlacePartialRotaryMul / RotaryMul -> npu_rotary_mul.
+        categories.add("attention.rope.partial")
+        categories.add("attention.rope")
+        roles.add("attention_aux")
+    if "rotaryembedding" in text and "interleaverope" not in text:
+        categories.add("attention.rope.indexed")
+        categories.add("attention.rope")
+        roles.add("attention_aux")
+
+    # --- Attention: residual generic catch ---  do NOT tag aux/companion
+    # rope/normalization kernels as attention.generic just because they
+    # contain "attention" — only tag when we have no specific subtype.
+    if "attention" in text and not any(
+        cat.startswith("attention.") for cat in categories
+    ):
         categories.add("attention.generic")
         roles.add("attention")
+
+    # --- MoE: gating top-k ------------------------------------------------
     if any(token in text for token in ("moegating", "gatingtopk", "topkgating", "topkrouter")):
         categories.add("moe.gating")
         roles.add("moe")
-    if any(token in text for token in ("dispatchffncombine", "ffncombine")):
+    # NOTE on HC* / MHC prefix: kernels such as ``HCPreSinkhorn``,
+    # ``HCPreInvRMS``, ``HCPost``, ``MhcRmsNorm`` carry an ``hc`` / ``mhc``
+    # prefix that is NOT HCCL. These appear as structural block-head
+    # helpers in BOTH the attention prologue and the MoE routing prologue
+    # (verified from a real DSV4 prefill profile where MHC variants show
+    # up before attention layers as well). They MUST stay under
+    # ``block_head.mhc_prefix`` — putting them in ``moe.gating`` was an
+    # earlier mistake; see the block-head heuristic block below.
+
+    # --- MoE: dispatch / combine / fused MC2 ------------------------------
+    is_fused_mc2_kernel = any(
+        token in text for token in ("dispatchffncombine", "ffncombine", "dispatchgmmcombine")
+    )
+    if is_fused_mc2_kernel:
         categories.add("moe.dispatch_expert_compute")
         roles.add("moe")
-    if any(token in text for token in ("moedispatch", "dispatch")) and "dispatchffncombine" not in text:
+    if "moeinitrouting" in text:
         categories.add("moe.dispatch")
         roles.add("moe")
-    if "combine" in text and "dispatchffncombine" not in text:
+    if any(token in text for token in ("moedispatch", "dispatch")) and not is_fused_mc2_kernel:
+        categories.add("moe.dispatch")
+        roles.add("moe")
+    if "combine" in text and not is_fused_mc2_kernel:
         categories.add("moe.combine")
         roles.add("moe")
-    if any(token in text for token in ("groupedmatmul", "batchmatmul", "quantbatchmatmul", "matmul", "gemm", "gmm")):
+
+    # --- MoE: expert matmul -----------------------------------------------
+    if any(token in text for token in ("groupedmatmul", "gmm")):
+        categories.add("moe.expert_matmul")
+        categories.add("compute.matmul")
+        roles.add("moe")
+        roles.add("compute")
+    if "groupedmatmulswigluquant" in text:
+        categories.add("moe.expert_matmul")
+        categories.add("compute.matmul")
+        roles.add("moe")
+        roles.add("compute")
+
+    # --- Compute: matmul / BMM (non-MoE / non-MLA-V-up-proj) --------------
+    if any(token in text for token in ("batchmatmul", "quantbatchmatmul", "matmul", "gemm")):
         categories.add("compute.matmul")
         roles.add("compute")
+
+    # --- Quantisation -----------------------------------------------------
+    if "dynamicmxquant" in text:
+        categories.add("quant.mx")
+        categories.add("compute.aux")
+        roles.add("quant")
+    elif "dynamicquant" in text:
+        categories.add("quant.dynamic")
+        categories.add("compute.aux")
+        roles.add("quant")
+    if "quantbatchmatmul" in text:
+        categories.add("quant.matmul")
+
+    # --- Sampling ---------------------------------------------------------
+    if "applytopktopp" in text:
+        categories.add("sampling.top_k_top_p")
+        categories.add("sampling_or_selection")
+        roles.add("sampling")
     if "argmax" in text:
+        categories.add("sampling.argmax")
         categories.add("sampling_or_selection")
         roles.add("selection")
-    if "compressor" in text or "compress" in text:
-        categories.add("attention.csa.compressor")
-        roles.add("attention_aux")
-    if "indexer" in text or "lightningindex" in text:
-        categories.add("attention.csa.indexer")
-        roles.add("attention_aux")
+
+    # --- Normalisation + block_head heuristics (UI-only structure hint) ---
+    # The "hc" / "mhc" prefix marks a structural block-head normalisation
+    # helper that can prefix EITHER an attention block OR an MoE routing
+    # block. We tag it as ``block_head.mhc_prefix`` regardless of which
+    # block follows; downstream consumers must NOT treat the prefix alone
+    # as evidence of MoE-only or attention-only context.
     is_collective = "communication.collective" in categories
-    if (text.startswith("hc") and not is_collective) or "mhc" in text:
-        categories.add("block_head.mhc_prefix")
-        roles.add("block_head")
+    if not is_collective:
+        if text.startswith("hc") or "mhc" in text:
+            categories.add("block_head.mhc_prefix")
+            roles.add("block_head")
     if "norm" in text:
         categories.add("normalization")
         roles.add("normalization")
-        if "add" in text or "mhc" in text or text.startswith("hc"):
+        if "add" in text or "mhc" in text or (text.startswith("hc") and not is_collective):
             categories.add("block_head")
             roles.add("block_head")
+
+    # --- AICPU ------------------------------------------------------------
     if any(token in text for token in ("aicpu", "ai_cpu")):
         categories.add("aicpu")
         roles.add("aicpu")
+
     result = (tuple(sorted(categories)), tuple(sorted(roles)))
     _CATEGORY_ROLE_CACHE[cache_key] = result
     return result

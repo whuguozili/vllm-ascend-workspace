@@ -14,6 +14,10 @@ analysis code; treat them as part of the contract.
 | `block_taxonomy.md` | attention / ffn / moe block decomposition + companion-layer rule | `classify.py:decompose_layer_into_blocks`, `summarize.py:block_summary_rows`, `report.py` |
 | `step_class_grouping.md` | strict shape-equality class signature rules for steps / layers / blocks | `classify.py:_class_id`, `summarize.py:*_class_summary_rows`, `report.py` |
 | `communication_taxonomy.md` | HCCL collective op kinds, sub-task primitives (Notify Wait / RDMASend / Memcpy / Reduce_Inline), `mix_comm_aiv` fused kernels, level-0 vs level-1 capture limits | `summarize.py:hccl_op_summary_rows`, `summarize.py:operator_class_summary_rows`, `report.py`, `cross_rank.py` |
+| `kernel_signatures.yaml` | Flat inventory: each profile kernel name → category labels + `evidence: path:line` in vllm / vllm-ascend. Authoritative source when adding a new kernel rule. | `common.categories_and_roles`, `tests/test_kernel_signatures.py` |
+| `attention_families.yaml` | MLA / SFA / KVComp / linear / dense families. Each family declares the **combination** of category signatures (must_have / must_not_have) that uniquely identifies it on Ascend; SFA is the in-code name for DeepSeek-V3.2 / V4 sparse attention (NOT "NSA" / "CSA"). | `common.categories_and_roles`, `html_report.detect_attention_subtype`, `tests/test_attention_families.py` |
+| `moe_families.yaml` | MC2 / fused MC2 / dense FFN families; also documents the closed-source routing-aux sub-kernels (`HCPreSinkhorn`, `HCPreInvRMS`, `HCPost`) and pins them under `moe.gating` instead of `block_head`. | `common.categories_and_roles`, `tests/test_moe_families.py` |
+| `model_architectures.yaml` | HF arch → (attention family, FFN family) high-level map. **Report-time annotation only**: not used to drive segmentation. Source for future `attention_family_mismatch` diagnostic. | `report.py` annotation, future `diagnostics.py` |
 
 When adding a new knowledge file, register it in the table above and
 reference it from the analysis stage that consumes it.
@@ -26,36 +30,79 @@ The maintenance rule is simple:
 - If a rule uses shape, stream, time, or rank context, record that context in
   the rule name and output evidence.
 
-## Suggested Files
+## Suggested Files (still to come)
 
 ```text
-operator_taxonomy.yaml
 structure_roles.yaml
 diagnosis_rules.yaml
 known_counterexamples.yaml
 ```
 
-## Operator Taxonomy
+## Operator Taxonomy (canonical list)
 
-The taxonomy should map raw kernels to one or more categories.  A single kernel
-can have multiple categories.
+The taxonomy maps raw kernels to one or more categories.  A single kernel
+can have multiple categories.  The full inventory lives in
+`kernel_signatures.yaml`; `semantic_conventions.yaml` enforces the closed
+enum.  Headline categories:
 
-Example categories:
+- attention (paper-neutral kernel labels; the architecture family —
+  `mla`, `dsa`, `csa`, `hca`, `gqa`, `linear`, `fa` — is resolved at
+  the report layer from the *combination* of categories present in
+  one block; see `attention_families.yaml`).
+  - `attention.gqa_or_mha`           — dense GQA / MHA path (Llama, Qwen, FIA)
+  - `attention.mla`                  — MLA preprocess / decode marker (DSV2/V3, also reused by DSA)
+  - `attention.mla.kv_norm_rope_cache` — `KvRmsNormRopeCache` fused op
+  - `attention.mla.preprocess`       — `MlaProlog` / `MlaPrologV2` / `MlaPreprocess` (CANN canonical names)
+  - `attention.mla.v_up_proj`        — MLA V up-projection BMM
+  - `attention.sparse_sharedkv`      — main sparse attention kernel (`KVQuantSparseAttnSharedKV`),
+                                       shared by DSA (V3.2) and CSA (V4) — family is resolved by
+                                       whether `attention.kv_compressor` is also present
+  - `attention.sparse_sharedkv.metadata` — metadata sub-kernel of the above
+  - `attention.lightning_indexer`    — `LightningIndexer` (top-k token/block selector)
+  - `attention.kv_compressor`        — `Compressor` / `KVCompressEpilog`; **only** V4 (CSA / HCA)
+  - `attention.sparse_attn.v_up_proj` — SFA-side V up-projection BMM
+  - `attention.kvcomp.topk`          — `NpuHammingDistTopK` decode overlay
+  - `attention.kvcomp.signpack`      — sign-bit packing helper
+  - `attention.kvcomp.cache_write`   — `NpuReshapeAndCacheBnsd`
+  - `attention.linear_or_mamba`      — Mamba / GDN / linear-attn kernels
+  - `attention.rope.*`               — RoPE variants (interleave, partial, indexed)
+- moe
+  - `moe.gating`                     — top-k selection (the genuine `MoeGatingTopK*` op only;
+                                       HC*/MHC* prefix kernels do NOT belong here — they are
+                                       block-head structural helpers that prefix BOTH attention
+                                       and MoE blocks)
+  - `moe.dispatch`
+  - `moe.combine`
+  - `moe.dispatch_expert_compute`    — fused MC2 single-kernel path
+  - `moe.expert_matmul`              — `GroupedMatmul` and variants
+- compute
+  - `compute.matmul`
+  - `compute.aux`
+- quant
+  - `quant.dynamic`
+  - `quant.mx`
+  - `quant.matmul`
+- communication
+  - `communication.collective`
+  - `communication.allreduce` / `.allgather` / `.reducescatter` / `.alltoallv`
+- sampling
+  - `sampling.argmax`
+  - `sampling.top_k_top_p`
+  - `sampling_or_selection`
+- system
+  - `normalization`
+  - `block_head`
+  - `aicpu`
+  - `dummy_or_reduced_work`
 
-- `attention.gqa_or_mha`
-- `attention.mla`
-- `attention.csa`
-- `attention.linear_or_mamba`
-- `moe.gating`
-- `moe.dispatch`
-- `moe.combine`
-- `moe.dispatch_expert_compute`
-- `compute.matmul`
-- `communication.collective`
-- `block_head`
-- `sampling_or_selection`
-- `aicpu`
-- `dummy_or_reduced_work`
+Two earlier drafts coined non-canonical names: `attention.csa*` (used
+as a generic catch-all) and `attention.sfa*` (used after a wrong
+subagent reading). **Neither is used anymore.** Sparse-attention
+kernels now live under the paper-neutral names listed above; the
+paper-aligned architecture family (`mla` / `dsa` / `csa` / `hca` /
+`gqa`) is resolved at the report layer, never baked into the kernel
+category. See `kernel_signatures.yaml:deprecated_categories` for the
+migration map.
 
 ## Structure Roles
 
@@ -69,8 +116,23 @@ Examples:
 - `moe_block`
   - accepted evidence: `moe.gating` plus one of `moe.dispatch_expert_compute`,
     `moe.dispatch + compute.matmul + moe.combine`
-- `csa_attention_block`
-  - accepted evidence: CSA sparse attention, optionally compressor/indexer
+- `csa_attention_block`  (DeepSeek-V4 main layers — Compressed Sparse Attention)
+  - accepted evidence: `attention.kv_compressor` + `attention.lightning_indexer`
+    + `attention.sparse_sharedkv` together in one block. MLA companions
+    (`attention.mla.kv_norm_rope_cache`, `attention.mla.preprocess`) may also
+    appear because the SFA backend reuses MLAPO at small token counts.
+- `hca_attention_block`  (DeepSeek-V4 alternating layers — Heavily Compressed Attention; heuristic)
+  - accepted evidence: `attention.kv_compressor` + `attention.gqa_or_mha`
+    with NO `attention.lightning_indexer` and NO `attention.sparse_sharedkv`.
+- `dsa_attention_block`  (DeepSeek-V3.2 — DeepSeek Sparse Attention per arxiv 2512.02556)
+  - accepted evidence: `attention.lightning_indexer` + `attention.sparse_sharedkv`
+    with NO `attention.kv_compressor`. MLA companions are expected because
+    DSA is built on MLA in MQA mode (paper §4).
+- `mla_attention_block`  (DeepSeek-V2 / V3 — Multi-head Latent Attention)
+  - accepted evidence: `attention.mla.kv_norm_rope_cache` plus
+    `attention.gqa_or_mha` (FIA[V2] still computes the score), without ANY
+    sparse-attention signature (`attention.kv_compressor`,
+    `attention.lightning_indexer`, `attention.sparse_sharedkv`).
 - `block_head`
   - accepted evidence: add+norm, fused add-norm, MHC+norm, or fused
     communication/matmul/add/norm prefix

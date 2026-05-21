@@ -22,6 +22,10 @@ which are *reference docs*.
 | `block_taxonomy.md` | Reference | `classify.py:decompose_layer_into_blocks`, `summarize.py:block_summary_rows`, `report.py` | attention / ffn / moe / aicpu |
 | `step_class_grouping.md` | Reference | `classify.py:_class_id`, `summarize.py:*_class_summary_rows` | strict shape-equality class signature |
 | `communication_taxonomy.md` | Reference | `summarize.py`, `report.py`, `cross_rank.py` | HCCL collectives + `mix_comm_aiv` |
+| `kernel_signatures.yaml` | **Contract** (active reference, Python mirrors it) | `common.categories_and_roles`, `tests/test_kernel_signatures.py` | flat inventory mapping each profile kernel name → category labels + evidence path:line in vllm / vllm-ascend |
+| `attention_families.yaml` | **Contract** (active reference) | `common.categories_and_roles`, `html_report.detect_attention_subtype`, `tests/test_attention_families.py` | paper-aligned families MLA / DSA / CSA / HCA / GQA / linear / FA, with "must-have / must-not-have" signature combinations; CANN backend names are documented but never used as family labels |
+| `moe_families.yaml` | **Contract** (active reference) | `common.categories_and_roles`, `tests/test_moe_families.py` | MC2 / fused MC2 / dense FFN families. **Note:** the `HC*` / `MHC*` prefix kernels are NOT moe.gating sub-kernels — they prefix both attention and MoE blocks and stay under `block_head.mhc_prefix` |
+| `model_architectures.yaml` | Reference (report-time annotation only) | future diagnostics for `attention_family_mismatch` | HF arch → (attention family, FFN family); NOT used for segmentation |
 | `README.md` | Reference | humans | historical notes; roadmap |
 
 ## Adding new knowledge
@@ -30,10 +34,18 @@ which are *reference docs*.
    add it to `semantic_conventions.yaml` first; `tests/test_semantic_conventions.py`
    then enforces that nothing leaks values outside the enum.
 2. **New kernel taxonomy rule** (e.g. a new attention sub-type or new
-   MoE fused kernel name): start with a counterexample in
-   `known_counterexamples.md` (create the file if missing), then update
-   `common.categories_and_roles()` to match it. After the rule landed,
-   add the new role / category value to `semantic_conventions.yaml`.
+   MoE fused kernel name):
+   1. Add an entry to `kernel_signatures.yaml` with `evidence: path:line`
+      pointing at the vllm / vllm-ascend source. **Anything without
+      evidence is rejected at review.**
+   2. If the kernel introduces a new family or changes a family's
+      "must-have" set, update `attention_families.yaml` or
+      `moe_families.yaml` accordingly.
+   3. Mirror the rule in `common.categories_and_roles()` (Python still
+      runs the matcher today; YAML is the contract).
+   4. Add the new category / role value to `semantic_conventions.yaml`.
+   5. `tests/test_kernel_signatures.py` rejects any category emitted by
+      Python that is missing from the YAML inventory.
 3. **New block decomposition variant**: update `block_taxonomy.md`
    first; then `classify.decompose_layer_into_blocks`. Re-run from
    `--from-stage classify`.
@@ -63,11 +75,16 @@ re-executed.
 See `references/deferred-work.md` in the skill root. The biggest
 remaining "knowledge externalization" items are:
 
-- **`operator_taxonomy.yaml`** — replace the Python rule list in
-  `common.categories_and_roles()` with a YAML-driven matcher.
+- **YAML-driven matcher** — replace the Python rule list in
+  `common.categories_and_roles()` with a loader that reads
+  `kernel_signatures.yaml` + `attention_families.yaml` +
+  `moe_families.yaml` directly. Today Python mirrors the YAML by hand
+  and the schema test enforces parity.
 - **`segmentation_strategy.yaml`** — anchor priority, boundary markers,
   residual policy, repair-rule enablement; consumed by `segment.py`.
 - **`known_counterexamples.yaml`** — fixture cases the segmenter /
   classifier must keep passing.
 - **`diagnosis_rules.yaml`** — declarative rule pack for
-  `diagnostics.py`.
+  `diagnostics.py`, including the `attention_family_mismatch` and
+  `block_pattern_unexpected` checks documented in
+  `model_architectures.yaml`.
