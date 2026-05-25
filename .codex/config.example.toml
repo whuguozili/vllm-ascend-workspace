@@ -1,0 +1,18 @@
+[mcp_servers.remote_dev]
+command = "python3"
+args = [".remote-dev/mcp/server.py"]
+startup_timeout_sec = 20
+tool_timeout_sec = 600
+enabled = true
+
+[features]
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$|^apply_patch$|^mcp__remote-dev__.*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = 'python3 "$(git rev-parse --show-toplevel)/.remote-dev/hooks/codex_remote_guard.py"'
+timeout = 30
+statusMessage = "Checking remote development policy"

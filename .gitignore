@@ -14,8 +14,12 @@ venv/
 *.out
 docs/superpowers/
 .claude/settings.local.json
-.codex/
+.codex/*
+!.codex/
+!.codex/config.example.toml
 .vaws-local/
+.remote-dev/state/
+.remote-dev/endpoints.local.json
 .machine-inventory.json
 .worktrees/
 

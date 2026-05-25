@@ -7,6 +7,11 @@ description: Start, check, or stop a single-node vLLM Ascend online service on a
 
 Manage the lifecycle of a **single-node colocated** `vllm-ascend` online service on a workspace-managed ready remote container or an isolated VAWS session container.
 
+Remote substrate rule: use `.remote-dev` remote tools for ad hoc remote
+read/edit/bash/search/patch work around a service. Use this skill for the
+domain service lifecycle contract and keep its scripts as the compatibility
+backend for managed VAWS sessions.
+
 This skill takes structured parameters, handles all SSH escaping and remote execution internally, and returns machine-readable JSON. The agent never needs to construct raw shell commands for service management.
 
 ## Use this skill when

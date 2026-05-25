@@ -1,5 +1,12 @@
 # Methodology: Ascend NPU Memory Profiling
 
+## Relationship to remote-dev
+
+Use `.remote-dev` tools for ad hoc remote read/edit/bash/search/patch around
+memory profiling setup and output inspection. This skill owns HBM attribution
+methodology and keeps the existing scripts as the managed VAWS compatibility
+backend.
+
 ## Core Principle
 
 **msprof is the primary data source.** It observes memory allocations at the CANN runtime level, capturing components that PyTorch's allocator cannot see (HCCL communication buffers, CANN runtime internal allocations, system logging buffers). npu-smi provides hardware-level ground truth for total HBM usage. vLLM logs provide application-level attribution for weights and KV cache.

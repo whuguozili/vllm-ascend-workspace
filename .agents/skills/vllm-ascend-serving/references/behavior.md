@@ -1,5 +1,11 @@
 # Behavior Reference
 
+## Relationship to remote-dev
+
+Use `.remote-dev` tools for ad hoc remote read/edit/bash/search/patch around a
+service. This skill owns service lifecycle semantics and keeps the existing
+scripts as the managed VAWS compatibility backend.
+
 ## Escaping safety
 
 The core value of this skill is that all SSH escaping is handled inside `serve_start.py`. The agent passes structured arguments via CLI flags; the script internally builds a bash script with proper `shlex.quote` on every dynamic value, then wraps the entire script for SSH transport. The agent should never construct raw `ssh ... "export ... && vllm serve ..."` commands for serving.

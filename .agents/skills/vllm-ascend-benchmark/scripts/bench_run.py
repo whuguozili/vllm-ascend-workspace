@@ -52,6 +52,7 @@ from _common import (
     now_utc,
     print_json,
     run_bench_on_remote,
+    write_local_result,
     _get_ssh_endpoint,
 )
 
@@ -248,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             if cleanup_warning:
                 result_json["cleanup_warning"] = cleanup_warning
+            write_local_result(config, result_json)
             print_json(result_json)
         else:
             aggregated = _aggregate_metrics(all_metrics, warmup_runs)
@@ -273,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             if cleanup_warning:
                 result_json["cleanup_warning"] = cleanup_warning
+            write_local_result(config, result_json)
             print_json(result_json)
         return 0
 

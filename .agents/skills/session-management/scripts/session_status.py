@@ -16,7 +16,11 @@ LIB_DIR = ROOT / ".agents" / "lib"
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
-from vaws_session_state import load_session_lookup, session_serving_state_path  # noqa: E402
+from vaws_session_state import (  # noqa: E402
+    load_session_lookup,
+    session_live_leases,
+    session_serving_state_path,
+)
 
 SSH_CHECK_TIMEOUT_SECONDS = 60
 
@@ -104,6 +108,11 @@ def main() -> int:
         local_root = Path(session["local"]["worktree_root"])
         remote = session["remote"]
         container = remote["container"]
+        live_leases = session_live_leases(
+            repo_root=lookup.state_repo_root,
+            machine_alias=session["base_machine"],
+            session_id=sid,
+        )
         serving = load_serving(session_serving_state_path(sid, lookup.state_repo_root))
         container_ssh = ssh_check(
             remote["host"],
@@ -138,6 +147,7 @@ def main() -> int:
                 },
                 "serving": serving,
                 "service_alive": service,
+                "live_leases": live_leases,
                 "session": session,
             }
         )

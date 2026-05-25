@@ -5,9 +5,14 @@ description: Resolve, probe, execute, observe jobs, sync, manage service lifecyc
 
 # VAWS Remote Toolbox
 
+Compatibility note: `.remote-dev` is now the preferred local-tool-like surface
+for ordinary remote endpoint development. Use this skill when the task needs
+managed VAWS target resolution, session containers, parity/sync, service
+adapters, artifact compatibility, or cleanup internals.
+
 Use this skill when an agent needs to operate a managed VAWS machine or session
-container with local-tool-like semantics instead of writing raw SSH, scp, sftp,
-manual tail, or manual ps/kill commands.
+container backend instead of writing raw SSH, scp, sftp, manual tail, or manual
+ps/kill commands.
 
 ## Critical Rules
 
@@ -17,6 +22,9 @@ manual tail, or manual ps/kill commands.
 - Final `stdout` is exactly one JSON object.
 - JSON failures must use one of: `needs_input`, `blocked`, `failed`,
   `timeout`, `needs_repair`, `cancelled`.
+- Let `remote_job_start.py` generate job ids by default. If you pass
+  `--job-id`, it must be globally unique in this workspace; duplicate local job
+  records are blocked before launching a remote process.
 - Artifact transfer uses SSH streaming plus manifest/hash verification. Do not
   depend on scp, sftp, or rsync.
 - `remote_sync_plan --mode source-only` and

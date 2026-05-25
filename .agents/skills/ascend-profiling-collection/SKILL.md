@@ -7,6 +7,11 @@ description: Collect one Ascend torch-profiler case end-to-end on a workspace-ma
 
 Collect one torch-profiler case on a workspace-managed remote Ascend NPU container.
 
+Remote substrate rule: use `.remote-dev` remote tools for ad hoc remote
+read/edit/bash/search/patch work around profile setup and output inspection.
+Use this skill for the domain collection workflow and keep its scripts as the
+compatibility backend for managed VAWS sessions.
+
 This skill is **only** about collection: start a profiled service, bracket a workload with `/start_profile` and `/stop_profile`, run `torch_npu.profiler.profiler.analyse(...)`, verify the device-side data actually landed, and write a manifest. Interpreting the resulting `kernel_details.csv` is a separate concern owned by the analysis skill.
 
 ## Use this skill when

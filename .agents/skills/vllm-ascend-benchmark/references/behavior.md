@@ -1,5 +1,11 @@
 # Benchmark Skill Behavior
 
+## Relationship to remote-dev
+
+Use `.remote-dev` tools for ad hoc remote read/edit/bash/search/patch around
+benchmark setup and result inspection. This skill owns benchmark lifecycle and
+keeps the existing scripts as the managed VAWS compatibility backend.
+
 ## Lifecycle
 
 1. **Resolve target** from local inventory or a VAWS session spec.

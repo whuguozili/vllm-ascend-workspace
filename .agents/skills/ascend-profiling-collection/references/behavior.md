@@ -1,5 +1,12 @@
 # Behavior Reference
 
+## Relationship to remote-dev
+
+Use `.remote-dev` tools for ad hoc remote read/edit/bash/search/patch around
+profile setup and output inspection. This skill owns profiler collection
+semantics and keeps the existing scripts as the managed VAWS compatibility
+backend.
+
 ## Why profiler control lives here, not in the serving skill
 
 `/start_profile` and `/stop_profile` only exist because vLLM has a built-in torch profiler. Moving the control client into `vllm-ascend-serving` would force serving to grow profiling-specific knobs (multi-rank long timeout, multi-api-server quirks). The serving skill stays simple by treating `--profiler-config` as an opaque blob it forwards to `vllm serve`. Anything that flips, waits on, or interprets the profiler window belongs here.

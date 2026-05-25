@@ -14,12 +14,15 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import os
+import re
 import socket
 import subprocess
 import sys
 import textwrap
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,7 @@ SERVING_SCRIPTS = ROOT / ".agents" / "skills" / "vllm-ascend-serving" / "scripts
 
 PROGRESS_SENTINEL = "__VAWS_PROFILING_COLLECTION_PROGRESS__="
 COLLECTION_STATE_DIR = ROOT / ".vaws-local" / "ascend-profiling-collection" / "runs"
+SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +96,40 @@ def now_utc() -> str:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def safe_run_token(value: str, *, fallback: str = "run", max_len: int = 80) -> str:
+    token = SAFE_TOKEN_RE.sub("-", value.strip()).strip(".-_")
+    if not token:
+        token = fallback
+    if len(token) <= max_len:
+        return token
+    digest = uuid.uuid5(uuid.NAMESPACE_URL, token).hex[:8]
+    keep = max(1, max_len - len(digest) - 1)
+    return f"{token[:keep].rstrip('.-_')}-{digest}"
+
+
+def unique_collection_run_dir(
+    *,
+    tag: str,
+    session_id: str | None = None,
+    machine: str | None = None,
+) -> Path:
+    target_token = safe_run_token(session_id or machine or "target", fallback="target")
+    tag_token = safe_run_token(tag, fallback="profile")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for _ in range(10):
+        name = (
+            f"{ts}_{tag_token}_{target_token}_"
+            f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        )
+        run_dir = COLLECTION_STATE_DIR / name
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            continue
+    raise RuntimeError("failed to allocate a unique profiling collection run directory")
 
 
 # ---------------------------------------------------------------------------

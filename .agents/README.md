@@ -2,12 +2,31 @@
 
 This directory contains the repository-local skill layer for Codex, Claude Code, and similar agents.
 
+Remote development now has a substrate layer at `.remote-dev/`. Use native local
+tools for local work, and use `.remote-dev` companion tools for remote endpoint
+work:
+
+- `remote.read`
+- `remote.write`
+- `remote.edit`
+- `remote.multi_edit`
+- `remote.bash`
+- `remote.glob`
+- `remote.grep`
+- `remote.ls`
+- `remote.monitor`
+- `remote.apply_patch`
+
+The `.agents` skills remain the domain workflow layer. They should consume the
+remote-dev substrate and keep the older VAWS remote-toolbox wrappers as
+compatibility backend for managed sessions, sync, service adapters, and cleanup.
+
 ## Layout
 
 - `.agents/skills/repo-init/` is the source-of-truth skill package for repository initialization.
 - `.agents/skills/machine-management/` is the source-of-truth skill package for remote machine attach, verify, repair, and removal workflows.
 - `.agents/skills/session-management/` is the source-of-truth skill package for isolated parallel agent sessions.
-- `.agents/skills/remote-toolbox/` is the source-of-truth skill package for structured agent-facing remote target/probe/exec/job/sync/service/artifact/cleanup tools.
+- `.agents/skills/remote-toolbox/` is the compatibility skill package for managed VAWS target/probe/exec/job/sync/service/artifact/cleanup tools.
 - `.agents/skills/remote-code-parity/` is the source-of-truth skill package for remote code parity before remote execution.
 - `.agents/skills/vllm-ascend-serving/` is the source-of-truth skill package for starting, checking, and stopping vLLM Ascend online services on managed containers.
 - `.agents/skills/vllm-ascend-benchmark/` is the source-of-truth skill package for running `vllm bench serve` performance benchmarks on managed containers.
@@ -113,7 +132,16 @@ Untracked workspace-local state lives under `.vaws-local/`:
 
 Parallel remote work should use `session-management` first. A session owns a local worktree, a dedicated remote container, session-scoped serving/benchmark/profiling state, and resource leases. Existing `--machine` commands remain legacy-compatible for single-tenant workflows.
 
-The remote toolbox is the preferred agent-facing surface once a target exists. It resolves host and container endpoints, probes actual runtime facts, runs bounded remote shell commands with local logs, tracks long jobs, splits source-only/materialize/install sync modes, wraps service lifecycle entrypoints, transfers artifacts with SSH streaming plus hash manifests, and performs dry-run-capable cleanup.
+The remote-dev substrate is the preferred agent-facing surface once an endpoint
+exists. It resolves host/port direct endpoints by default, mirrors native
+read/edit/bash/search/patch semantics, records local refs under
+`.remote-dev/state/`, and exposes an MCP server plus CLI fallbacks.
+
+The remote toolbox remains the managed VAWS backend. It resolves host and
+container endpoints, probes actual runtime facts, runs bounded remote shell
+commands with local logs, tracks long jobs, splits source-only/materialize/install
+sync modes, wraps service lifecycle entrypoints, transfers artifacts with SSH
+streaming plus hash manifests, and performs dry-run-capable cleanup.
 
 Remote-code-parity transport is container-only after machine attach: use machine inventory to resolve the target, then push synthetic refs directly into the container-local cache root. Synthetic mirrors should also publish an advertised branch ref for the current snapshot so nested repos can be materialized without brittle submodule fetch behavior. Runtime installs should explicitly forward whitelisted `VAWS_*` compile/cache env into the remote shell, configure multiple pip indexes (Tsinghua as primary, Aliyun and PyPI as additional), scope the default Ascend package index to `vllm-ascend` installs, reuse pip / uv / CMake `FetchContent` caches under `/root/.cache`, default paired-image editable installs to `--no-deps`, bound uv bootstrap mirror attempts, stream progress for long package steps, record the effective install env, and keep consent/runtime-state writes atomic.
 

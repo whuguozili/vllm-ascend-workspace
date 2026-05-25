@@ -18,7 +18,7 @@ LIB_DIR = ROOT / ".agents" / "lib"
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
-from vaws_session_state import load_session_lookup  # noqa: E402
+from vaws_session_state import load_session_lookup, session_benchmark_dir  # noqa: E402
 from vaws_validate import require_env_name  # noqa: E402
 
 SERVING_SCRIPTS = ROOT / ".agents" / "skills" / "vllm-ascend-serving" / "scripts"
@@ -58,6 +58,31 @@ def now_utc() -> str:
 def safe_token(value: str) -> str:
     token = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in value)
     return token.strip(".-") or "benchmark"
+
+
+def benchmark_runs_dir(config: "BenchConfig") -> Path:
+    if config.session_id:
+        return session_benchmark_dir(config.session_id, ROOT) / "runs"
+    if config.session_file:
+        lookup = load_session_lookup(session_file=config.session_file)
+        return session_benchmark_dir(lookup.session["session_id"], lookup.state_repo_root) / "runs"
+    target = safe_token(config.machine or "legacy")
+    return BENCHMARK_STATE_DIR / target / "runs"
+
+
+def write_local_result(config: "BenchConfig", result: dict[str, Any]) -> Path:
+    runs_dir = benchmark_runs_dir(config)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    target_token = safe_token(config.session_id or config.machine or "benchmark")
+    filename = (
+        f"{now_utc().replace(':', '-')}_{target_token}_"
+        f"{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
+    )
+    result_path = runs_dir / filename
+    result["result_path"] = str(result_path)
+    result["run_dir"] = str(runs_dir)
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return result_path
 
 
 def _run_json_command_streaming(

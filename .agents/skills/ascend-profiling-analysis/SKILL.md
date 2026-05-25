@@ -7,6 +7,11 @@ description: Analyze Ascend NPU torch profiler output (kernel_details.csv / trac
 
 > Status: **experimental / beta**. 当前 PR 主要提供：远端 pipeline、evidence-chained report、HTML 三级聚焦视图、stage selector。**主动 knowledge 仍在 Python 内（`common.py:categories_and_roles`、`segment.py` 切分规则、`classify.py` block 拆分等）**，YAML 化 knowledge 已起步（见 [Knowledge map](#knowledge-map-for-agents)）但尚未替换 Python 规则。新模型 / 新算子族碰到问题时，仍可能需要改 Python，请把 counterexample 落到 `knowledge/known_counterexamples.md` 再改代码。
 
+Remote substrate rule: use `.remote-dev` remote tools for ad hoc remote
+read/edit/bash/search/patch work around profiling roots and generated reports.
+Use this skill for the domain analysis workflow and keep its scripts as the
+compatibility backend for managed VAWS sessions.
+
 读取 Ascend NPU torch profiler 的产物 (`kernel_details.csv`, `trace_view.json`, `op_summary`, `communication.json` 等)，做 **normalize → segment → summarize → cross-rank → diagnostics → report** 的端到端分析，产物全部可追溯到原始 row range。
 
 本 skill 只消费已经采集好的 profiling root，**不负责采集**，不负责服务生命周期，不负责 benchmark。

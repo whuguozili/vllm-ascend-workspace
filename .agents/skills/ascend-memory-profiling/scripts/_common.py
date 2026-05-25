@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from vaws_session_state import (  # noqa: E402
 MEMPROF_STATE_DIR = ROOT / ".vaws-local" / "memory-profiling"
 SERVING_STATE_DIR = ROOT / ".vaws-local" / "serving"
 PROGRESS_SENTINEL = "__VAWS_MEMPROF_PROGRESS__="
+SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 ENV_PREAMBLE = (
     "source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null; "
@@ -178,12 +180,33 @@ def resolve_execution_target(
     }
 
 
+def _safe_run_token(value: str, *, fallback: str = "run", max_len: int = 80) -> str:
+    token = SAFE_TOKEN_RE.sub("-", value.strip()).strip(".-_")
+    if not token:
+        token = fallback
+    if len(token) <= max_len:
+        return token
+    digest = uuid.uuid5(uuid.NAMESPACE_URL, token).hex[:8]
+    keep = max(1, max_len - len(digest) - 1)
+    return f"{token[:keep].rstrip('.-_')}-{digest}"
+
+
 def ensure_run_dir(tag: str = "") -> Path:
     ts = time.strftime("%Y%m%d_%H%M%S")
-    name = f"{ts}_{tag}" if tag else ts
-    d = MEMPROF_STATE_DIR / name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    tag_token = _safe_run_token(tag, fallback="memory") if tag else ""
+    for _ in range(10):
+        suffix = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        parts = [ts]
+        if tag_token:
+            parts.append(tag_token)
+        parts.append(suffix)
+        d = MEMPROF_STATE_DIR / "_".join(parts)
+        try:
+            d.mkdir(parents=True, exist_ok=False)
+            return d
+        except FileExistsError:
+            continue
+    raise RuntimeError("failed to allocate a unique memory profiling run directory")
 
 
 def find_python(endpoint: SshEndpoint) -> str:

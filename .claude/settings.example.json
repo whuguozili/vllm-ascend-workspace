@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(**)",
+      "Write(**)",
+      "Bash(git *)",
+      "Bash(python3 *)",
+      "mcp__remote-dev__remote_read",
+      "mcp__remote-dev__remote_bash",
+      "mcp__remote-dev__remote_edit",
+      "mcp__remote-dev__remote_apply_patch"
+    ],
+    "deny": [
+      "Bash(sshpass *)",
+      "Bash(expect *)",
+      "Bash(scp *)",
+      "Bash(sftp *)",
+      "Bash(rsync *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .remote-dev/hooks/claude_remote_guard.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

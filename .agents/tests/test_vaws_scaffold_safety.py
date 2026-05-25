@@ -19,7 +19,13 @@ if str(LIB_DIR) not in sys.path:
 import vaws_remote_toolbox as toolbox  # noqa: E402
 from vaws_remote_toolbox import RemoteTarget, SshEndpoint  # noqa: E402
 from vaws_session_id import normalize_session_id  # noqa: E402
-from vaws_session_state import SessionStateError, allocate_session_leases  # noqa: E402
+from vaws_session_state import (  # noqa: E402
+    SessionStateError,
+    allocate_service_port,
+    allocate_session_leases,
+    release_service_port,
+    session_live_leases,
+)
 from vaws_validate import (  # noqa: E402
     ValidationError,
     parse_device_csv,
@@ -33,6 +39,15 @@ def load_session_create_module():
     spec = importlib.util.spec_from_file_location("_vaws_session_create_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_script_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -79,6 +94,36 @@ class RemoteToolboxSafetyTests(unittest.TestCase):
         self.assertIn(toolbox.JOB_STATE_DIR.resolve(), valid.parents)
         with self.assertRaises(ValidationError):
             toolbox._job_record_path("../sessions/leases")
+
+    def test_duplicate_job_id_is_blocked_before_remote_launch(self) -> None:
+        original_dir = toolbox.JOB_STATE_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                toolbox.JOB_STATE_DIR = Path(tmp)  # type: ignore[assignment]
+                target = RemoteTarget(
+                    mode="session",
+                    alias="machine-a",
+                    target_id="sess-abc",
+                    workspace_id="sess-abc",
+                    workspace_root=Path(tmp),
+                    runtime_root="/workspace",
+                    container_name="vaws-test",
+                    container_image="image",
+                    container_endpoint=SshEndpoint("127.0.0.1", 46000),
+                    host_endpoint=SshEndpoint("127.0.0.1", 22),
+                    state_repo_root=Path(tmp),
+                    record={},
+                    session_id="sess-abc",
+                    session_file=Path(tmp) / "session.json",
+                    session={"session_id": "sess-abc"},
+                    leased_devices=[],
+                )
+                toolbox._save_job_record("job-collision", {"job_id": "job-collision", "target": target.to_dict()})
+                payload = toolbox.start_remote_job(target, command="echo should-not-run", job_id="job-collision")
+                self.assertEqual(payload["status"], "blocked")
+                self.assertIn("already exists", payload["error"])
+        finally:
+            toolbox.JOB_STATE_DIR = original_dir  # type: ignore[assignment]
 
     def test_env_items_validate_before_shell_export(self) -> None:
         self.assertEqual(toolbox._parse_env_items(["A_B=1"]), {"A_B": "1"})
@@ -152,6 +197,52 @@ class LeaseValidationTests(unittest.TestCase):
                     port_available=lambda _port: True,
                 )
 
+    def test_live_leases_include_allocated_service_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allocate_session_leases(
+                repo_root=root,
+                machine_alias="machine-a",
+                session_id="sess-abc",
+                requested_devices=[1],
+                available_devices=[0, 1],
+                container_ssh_port=46001,
+                port_available=lambda _port: True,
+            )
+            allocate_service_port(
+                repo_root=root,
+                machine_alias="machine-a",
+                session_id="sess-abc",
+                requested_port=30001,
+                port_available=lambda _port: True,
+            )
+            self.assertEqual(
+                session_live_leases(
+                    repo_root=root,
+                    machine_alias="machine-a",
+                    session_id="sess-abc",
+                ),
+                {
+                    "npu_devices": [1],
+                    "container_ssh_ports": [46001],
+                    "service_ports": [30001],
+                },
+            )
+            release_service_port(
+                repo_root=root,
+                machine_alias="machine-a",
+                session_id="sess-abc",
+                port=30001,
+            )
+            self.assertEqual(
+                session_live_leases(
+                    repo_root=root,
+                    machine_alias="machine-a",
+                    session_id="sess-abc",
+                )["service_ports"],
+                [],
+            )
+
 
 class WorktreeCreateTests(unittest.TestCase):
     def test_staging_binding_is_written_before_submodule_update(self) -> None:
@@ -221,6 +312,78 @@ class WorktreeCreateTests(unittest.TestCase):
             binding = json.loads((worktree_root / ".vaws-local" / "current-session.json").read_text())
             self.assertEqual(binding["session_id"], "sess-abc")
             self.assertEqual(binding["source"], "session_create-staging")
+
+
+class RunStateIsolationTests(unittest.TestCase):
+    def test_memory_profiling_run_dirs_are_unique_and_sanitized(self) -> None:
+        module = load_script_module(
+            "_vaws_mem_common_test",
+            ROOT / ".agents" / "skills" / "ascend-memory-profiling" / "scripts" / "_common.py",
+        )
+        original_state_dir = module.MEMPROF_STATE_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                module.MEMPROF_STATE_DIR = Path(tmp) / "memory"
+                first = module.ensure_run_dir(tag="../same tag")
+                second = module.ensure_run_dir(tag="../same tag")
+                self.assertNotEqual(first, second)
+                self.assertEqual(first.parent, module.MEMPROF_STATE_DIR)
+                self.assertEqual(second.parent, module.MEMPROF_STATE_DIR)
+                self.assertNotIn("..", first.name)
+                self.assertNotIn("/", first.name)
+        finally:
+            module.MEMPROF_STATE_DIR = original_state_dir
+
+    def test_profiling_collection_run_dirs_include_session_and_do_not_collide(self) -> None:
+        module = load_script_module(
+            "_vaws_profile_collection_common_test",
+            ROOT / ".agents" / "skills" / "ascend-profiling-collection" / "scripts" / "_common.py",
+        )
+        original_state_dir = module.COLLECTION_STATE_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                module.COLLECTION_STATE_DIR = Path(tmp) / "profile-runs"
+                first = module.unique_collection_run_dir(tag="../same tag", session_id="sess-a")
+                second = module.unique_collection_run_dir(tag="../same tag", session_id="sess-a")
+                self.assertNotEqual(first, second)
+                self.assertEqual(first.parent, module.COLLECTION_STATE_DIR)
+                self.assertEqual(second.parent, module.COLLECTION_STATE_DIR)
+                self.assertIn("sess-a", first.name)
+                self.assertNotIn("..", first.name)
+                self.assertNotIn("/", first.name)
+        finally:
+            module.COLLECTION_STATE_DIR = original_state_dir
+
+    def test_benchmark_results_are_written_under_session_state(self) -> None:
+        module = load_script_module(
+            "_vaws_benchmark_common_test",
+            ROOT / ".agents" / "skills" / "vllm-ascend-benchmark" / "scripts" / "_common.py",
+        )
+        original_root = module.ROOT
+        original_state_dir = module.BENCHMARK_STATE_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                module.ROOT = root
+                module.BENCHMARK_STATE_DIR = root / ".vaws-local" / "benchmark"
+                config = module.BenchConfig(
+                    machine="173.131.1.2",
+                    session_id="sess-a",
+                    model="/models/Qwen",
+                )
+                payload = {"status": "ok"}
+                result_path = module.write_local_result(config, payload)
+                expected_parent = (
+                    root / ".vaws-local" / "sessions" / "sess-a" / "benchmark" / "runs"
+                )
+                self.assertEqual(result_path.parent, expected_parent)
+                saved = json.loads(result_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["status"], "ok")
+                self.assertEqual(saved["result_path"], str(result_path))
+                self.assertEqual(saved["run_dir"], str(expected_parent))
+        finally:
+            module.ROOT = original_root
+            module.BENCHMARK_STATE_DIR = original_state_dir
 
 
 if __name__ == "__main__":

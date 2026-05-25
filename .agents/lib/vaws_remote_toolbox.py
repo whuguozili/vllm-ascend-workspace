@@ -819,6 +819,10 @@ def _save_job_record(job_id: str, record: dict[str, Any]) -> None:
     _atomic_write_json(_job_record_path(job_id), record)
 
 
+def _job_record_exists(job_id: str) -> bool:
+    return _job_record_path(job_id).exists()
+
+
 def _load_job_record(job_id: str) -> dict[str, Any]:
     path = _job_record_path(job_id)
     if not path.exists():
@@ -843,6 +847,16 @@ def start_remote_job(
         job_id or f"job-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}",
         label="job id",
     )
+    if _job_record_exists(job_id):
+        return {
+            "status": "blocked",
+            "target": target.to_dict(),
+            "started_at": started_at,
+            "duration_ms": duration_ms(start),
+            "error": f"remote job id already exists locally: {job_id}",
+            "job_id": job_id,
+            "logs": {"local_record": str(_job_record_path(job_id))},
+        }
     remote_dir = _remote_job_dir(target, job_id)
     cwd = cwd or target.runtime_root
     env = env or {}
@@ -1969,7 +1983,7 @@ def cli_job_start(argv: Sequence[str] | None = None) -> int:
     try:
         env = _parse_env_items(args.env)
         job_id = require_safe_id(args.job_id, label="job id") if args.job_id else None
-        print_json(start_remote_job(
+        payload = start_remote_job(
             target_from_args(args),
             command=args.command,
             cwd=args.cwd,
@@ -1978,8 +1992,9 @@ def cli_job_start(argv: Sequence[str] | None = None) -> int:
             timeout_seconds=args.timeout,
             job_id=job_id,
             runtime_env=not args.no_runtime_env,
-        ))
-        return 0
+        )
+        print_json(payload)
+        return 0 if payload.get("status") == "ok" else 1
     except Exception as exc:  # noqa: BLE001
         return _cli_error(exc, started_at=started_at, start=start)
 

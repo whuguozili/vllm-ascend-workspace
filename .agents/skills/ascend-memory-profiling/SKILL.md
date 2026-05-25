@@ -7,6 +7,11 @@ description: Profile and attribute HBM memory usage on Ascend NPU for vLLM servi
 
 Collect and analyze HBM memory usage on Ascend NPU devices running vLLM serving workloads. Produces a structured breakdown of memory by component, with every value traceable to its data source.
 
+Remote substrate rule: use `.remote-dev` remote tools for ad hoc remote
+read/edit/bash/search/patch work around memory profiling setup and output
+inspection. Use this skill for the domain HBM workflow and keep its scripts as
+the compatibility backend for managed VAWS sessions.
+
 ## Use this skill when
 
 - the user asks to profile or analyze GPU/NPU memory (显存) usage

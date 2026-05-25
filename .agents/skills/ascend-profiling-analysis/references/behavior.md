@@ -1,5 +1,11 @@
 # Profiling Analysis Skill Behavior
 
+## Relationship to remote-dev
+
+Use `.remote-dev` tools for ad hoc remote read/edit/bash/search/patch around
+profiling roots and generated reports. This skill owns analysis semantics and
+keeps the existing scripts as the managed VAWS compatibility backend.
+
 ## Lifecycle
 
 1. **Resolve machine** from local inventory (alias or IP).

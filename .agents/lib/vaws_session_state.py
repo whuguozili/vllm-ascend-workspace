@@ -386,6 +386,31 @@ def release_service_port(
             save_leases(leases, repo_root)
 
 
+def session_live_leases(
+    *,
+    repo_root: Path = ROOT,
+    machine_alias: str,
+    session_id: str,
+) -> dict[str, list[int]]:
+    sid = require_session_id(session_id)
+    leases = load_leases(repo_root)
+    bucket = _machine_lease_bucket(leases, machine_alias)
+    live: dict[str, list[int]] = {
+        "npu_devices": [],
+        "container_ssh_ports": [],
+        "service_ports": [],
+    }
+    for kind in live:
+        for value, record in bucket.get(kind, {}).items():
+            if isinstance(record, dict) and record.get("session_id") == sid:
+                try:
+                    live[kind].append(int(value))
+                except ValueError:
+                    continue
+        live[kind].sort()
+    return live
+
+
 def release_all_session_leases(*, repo_root: Path = ROOT, session_id: str) -> None:
     sid = require_session_id(session_id)
     with file_lock(session_lock_dir(repo_root) / "leases.lock"):

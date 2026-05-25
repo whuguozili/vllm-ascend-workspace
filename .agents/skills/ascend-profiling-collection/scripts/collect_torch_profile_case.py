@@ -59,6 +59,7 @@ from _common import (
     print_json,
     resolve_execution_target,
     resolve_machine,
+    unique_collection_run_dir,
 )
 from profile_control import post_remote_action
 from run_remote_analyse import analyse_profile_root
@@ -510,9 +511,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.machine:
             args.machine = session_target.alias
 
-    ensure_dir(COLLECTION_STATE_DIR)
-    run_dir = COLLECTION_STATE_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.tag}"
-    ensure_dir(run_dir)
+    run_dir = unique_collection_run_dir(
+        tag=args.tag,
+        session_id=args.session_id,
+        machine=args.machine,
+    )
 
     prompt_prefix = (
         "Please describe the image and also summarize the long text context."
